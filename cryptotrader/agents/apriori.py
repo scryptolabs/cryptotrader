@@ -1135,3 +1135,92 @@ class TCOTrader(APrioriAgent):
         self.smooth = kwargs['smooth']
 
 
+class AnticorTrader(APrioriAgent):
+    """ Anticor (anti-correlation) is a heuristic portfolio selection algorithm.
+    It adopts the consistency of positive lagged cross-correlation and negative
+    autocorrelation to adjust the portfolio. Eventhough it has no known bounds and
+    hence is not considered to be universal, it has very strong empirical results.
+    It has implemented C version in scipy.weave to improve performance (around 10x speed up).
+    Another option is to use Numba.
+    Reference:
+        A. Borodin, R. El-Yaniv, and V. Gogan.  Can we learn to beat the best stock, 2005.
+        http://www.cs.technion.ac.il/~rani/el-yaniv-papers/BorodinEG03.pdf
+    """
+
+    def __repr__(self):
+        return "AnticorTrader"
+
+    def __init__(self, window=30, fiat="USDT"):
+        """
+        :param window: Window parameter.
+        :param c_version: Use c_version, up to 10x speed-up.
+        """
+        super().__init__(fiat=fiat)
+        self.window = window
+
+    def act(self, obs):
+        """
+        Performs a single step on the environment
+        """
+        if self.step == 0:
+            n_pairs = obs.columns.levels[0].shape[0]
+            action = np.ones(n_pairs)
+            action[-1] = 0
+            return array_normalize(action)
+        else:
+            prev_posit = self.get_portfolio_vector(obs, index=-1)
+            price_log1 = pd.DataFrame()
+            price_log2 = pd.DataFrame()
+            last_b = np.empty(obs.columns.levels[0].shape[0] - 1, dtype=np.float64)
+            for key, symbol in enumerate([s for s in obs.columns.levels[0] if s is not self.fiat]):
+                price_log1[key] = obs[symbol].open.iloc[-2 * self.window + 1 : - self.window].rolling(2).apply(
+                    lambda x: np.log(x[-1] / x[-2])).dropna().T
+                price_log2[key] = obs[symbol].open.iloc[-self.window + 1:].rolling(2).apply(
+                    lambda x: np.log(x[-1] / x[-2])).dropna().T
+                last_b[key] = np.float64(prev_posit[key])
+        return self.update(last_b, price_log1, price_log2)
+
+    def rebalance(self, obs):
+        return self.act(obs)
+
+    def update(self, b, lx1, lx2):
+
+        mean2 = np.array(lx2.mean())
+
+        std1 = lx1.std().apply(lambda x: np.inf if x == 0 else x)
+        std2 = lx2.std().apply(lambda x: np.inf if x == 0 else x)
+
+        corr = np.matmul(((lx1 - lx1.mean()) / std1).T, (lx2 - lx2.mean()) / std2)
+
+        # for t in mean1:
+        #
+        #     # claim[i,j] is claim from stock i to j
+        claim = np.zeros_like(corr)
+
+        for i in range(corr.shape[0]):
+            for j in range(corr.shape[1]):
+                if i == j: continue
+                else:
+                    if mean2[i] > mean2[j] and corr[i, j] > 0:
+                        claim[i, j] += corr[i, j]
+                        # autocorrelation
+                        if corr[i, i] < 0:
+                            claim[i, j] += abs(corr[i, i])
+                        if corr[j, j] < 0:
+                            claim[i, j] += abs(corr[j, j])
+
+        # calculate transfer
+        transfer = claim * 0.
+        for i in range(corr.shape[0]):
+            for j in range(corr.shape[1]):
+                if i == j: continue
+                else:
+                    transfer[i, j] = b[i] * claim[i, j] / sum(claim[i,:])
+
+        for i in range(b):
+            b[i] =  b[i] + sum(transfer[:, i]) - sum(transfer[i, :])
+
+        return np.append(simplex_proj(b),0)
+
+    def set_params(self, **kwargs):
+        self.window = int(kwargs['window'])

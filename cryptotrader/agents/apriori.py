@@ -178,10 +178,10 @@ class APrioriAgent(Agent):
             env.training = False
             print("\nOptimization interrupted by user.")
             return opt_params, info
-        except KeyError:
-            env.training = False
-            print("\nOptimization interrupted by user.")
-            return None, None
+        # except KeyError:
+        #     env.training = False
+        #     print("\nOptimization interrupted by user.")
+        #     return None, None
 
     def test(self, env, nb_episodes=1, action_repetition=1, callbacks=None, visualize=False,
              nb_max_episode_steps=None, nb_max_start_steps=0, start_step_policy=None, verbose=False):
@@ -573,15 +573,14 @@ class MomentumTrader(APrioriAgent):
             prev_posit = self.get_portfolio_vector(obs)
             position = np.empty(obs.columns.levels[0].shape[0], dtype=np.float32)
             factor = self.act(obs)
-            for i in range(position.shape[0] - 1):
-
+            for i, symbol in enumerate([s for s in obs.columns.levels[0] if s is not self.fiat]):
                 if factor[i] >= 0.0:
                     position[i] = max(0., prev_posit[i] + self.alpha[0] * factor[i] / \
-                                      (obs.open.rolling(self.std_span, min_periods=1, center=False).std().iat[-1] +
+                                      (obs[symbol].open.rolling(self.std_span, min_periods=1, center=False).std().iat[-1] +
                                        self.epsilon))
                 else:
                     position[i] = max(0., prev_posit[i] + self.alpha[1] * factor[i] / \
-                                      (obs.open.rolling(self.std_span, min_periods=1, center=False).std().iat[-1] +
+                                      (obs[symbol].open.rolling(self.std_span, min_periods=1, center=False).std().iat[-1] +
                                        self.epsilon))
 
             position[-1] = max(0., 1 - position[:-1].sum())

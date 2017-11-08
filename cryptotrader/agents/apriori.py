@@ -1150,51 +1150,53 @@ class AnticorTrader(APrioriAgent):
     def __repr__(self):
         return "AnticorTrader"
 
-    def __init__(self, window=30, fiat="USDT"):
+    def __init__(self, window=30, smooth=0.5, fiat="USDT"):
         """
         :param window: Window parameter.
         :param c_version: Use c_version, up to 10x speed-up.
         """
         super().__init__(fiat=fiat)
         self.window = window
+        self.smooth = smooth
 
-    def act(self, obs):
+    def factor(self, obs):
         """
         Performs a single step on the environment
         """
-        if self.step == 0:
+        # price_log1 = pd.DataFrame()
+        # price_log2 = pd.DataFrame()
+        price_log1 = np.empty((self.window - 2, obs.columns.levels[0].shape[0] - 1), dtype='f')
+        price_log2 = np.empty((self.window - 2, obs.columns.levels[0].shape[0] - 1), dtype='f')
+        for key, symbol in enumerate([s for s in obs.columns.levels[0] if s is not self.fiat]):
+            price_log1[:, key] = obs[symbol].open.iloc[-2 * self.window + 1:-self.window].rolling(2).apply(
+                lambda x: np.log(x[-1] / x[-2])).dropna().values.T
+            price_log2[:, key] = obs[symbol].open.iloc[-self.window + 1:].rolling(2).apply(
+                lambda x: np.log(x[-1] / x[-2])).dropna().values.T
+        return price_log1, price_log2
+
+    def rebalance(self, obs):
+        if self.step:
+            prev_posit = self.get_portfolio_vector(obs, index=-1)[:-1]
+            factor = self.factor(obs)
+            return self.update(prev_posit, *factor)
+        else:
             n_pairs = obs.columns.levels[0].shape[0]
             action = np.ones(n_pairs)
             action[-1] = 0
             return array_normalize(action)
-        else:
-            prev_posit = self.get_portfolio_vector(obs, index=-1)
-            price_log1 = pd.DataFrame()
-            price_log2 = pd.DataFrame()
-            last_b = np.empty(obs.columns.levels[0].shape[0] - 1, dtype=np.float64)
-            for key, symbol in enumerate([s for s in obs.columns.levels[0] if s is not self.fiat]):
-                price_log1[key] = obs[symbol].open.iloc[-2 * self.window + 1 : - self.window].rolling(2).apply(
-                    lambda x: np.log(x[-1] / x[-2])).dropna().T
-                price_log2[key] = obs[symbol].open.iloc[-self.window + 1:].rolling(2).apply(
-                    lambda x: np.log(x[-1] / x[-2])).dropna().T
-                last_b[key] = np.float64(prev_posit[key])
-        return self.update(last_b, price_log1, price_log2)
 
-    def rebalance(self, obs):
-        return self.act(obs)
+    @staticmethod
+    def zero_to_inf(vec):
+        return np.vectorize(lambda x: np.inf if np.allclose(x, 0.0) else x)(vec)
 
     def update(self, b, lx1, lx2):
+        # std1 = lx1.std().apply(lambda x: np.inf if np.allclose(x, 0.0) else x)
+        # std2 = lx2.std().apply(lambda x: np.inf if np.allclose(x, 0.0) else x)
+        mean2 = lx2.mean(axis=0)
+        std1 = self.zero_to_inf(lx1.std(axis=0))
+        std2 = self.zero_to_inf(lx2.std(axis=0))
 
-        mean2 = np.array(lx2.mean())
-
-        std1 = lx1.std().apply(lambda x: np.inf if x == 0 else x)
-        std2 = lx2.std().apply(lambda x: np.inf if x == 0 else x)
-
-        corr = np.matmul(((lx1 - lx1.mean()) / std1).T, (lx2 - lx2.mean()) / std2)
-
-        # for t in mean1:
-        #
-        #     # claim[i,j] is claim from stock i to j
+        corr = np.matmul(((lx1 - lx1.mean(axis=0)) / std1).T, (lx2 - mean2) / std2)
         claim = np.zeros_like(corr)
 
         for i in range(corr.shape[0]):
@@ -1215,12 +1217,13 @@ class AnticorTrader(APrioriAgent):
             for j in range(corr.shape[1]):
                 if i == j: continue
                 else:
-                    transfer[i, j] = b[i] * claim[i, j] / sum(claim[i,:])
+                    transfer[i, j] = b[i] * claim[i, j] / (claim[i,:].sum() + self.epsilon)
 
-        for i in range(b):
-            b[i] =  b[i] + sum(transfer[:, i]) - sum(transfer[i, :])
+        for i in range(b.shape[0]):
+            b[i] += self.smooth * (transfer[:, i].sum() - transfer[i, :].sum())
 
         return np.append(simplex_proj(b),0)
 
     def set_params(self, **kwargs):
         self.window = int(kwargs['window'])
+        self.smooth = kwargs['smooth']
